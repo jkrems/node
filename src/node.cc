@@ -267,7 +267,7 @@ static struct {
   bool StartInspector(Environment *env, const char* script_path,
                       const node::DebugOptions& options) {
     env->ThrowError("Node compiled with NODE_USE_V8_PLATFORM=0");
-    return false;  // make compiler happy
+    return true;  // make compiler happy
   }
 
   void StartTracingAgent() {
@@ -279,7 +279,6 @@ static struct {
 } v8_platform;
 
 #ifdef __POSIX__
-static uv_sem_t debug_semaphore;
 static const unsigned kMaxSignal = 32;
 #endif
 
@@ -2568,9 +2567,7 @@ void FatalException(Isolate* isolate,
 
   if (exit_code) {
 #if HAVE_INSPECTOR
-    if (debug_options.inspector_enabled()) {
-      env->inspector_agent()->FatalException(error, message);
-    }
+    env->inspector_agent()->FatalException(error, message);
 #endif
     exit(exit_code);
   }
@@ -3823,10 +3820,6 @@ static void DispatchMessagesDebugAgentCallback(Environment* env) {
 static void StartDebug(Environment* env, const char* path,
                        DebugOptions debug_options) {
   CHECK(!debugger_running);
-#if HAVE_INSPECTOR
-  if (debug_options.inspector_enabled())
-    debugger_running = v8_platform.StartInspector(env, path, debug_options);
-#endif  // HAVE_INSPECTOR
   if (debug_options.debugger_enabled()) {
     env->debugger_agent()->set_dispatch_handler(
           DispatchMessagesDebugAgentCallback);
@@ -3836,6 +3829,10 @@ static void StartDebug(Environment* env, const char* path,
               debug_options.host_name().c_str(), debug_options.port());
       fflush(stderr);
     }
+#if HAVE_INSPECTOR
+  } else {
+    debugger_running = v8_platform.StartInspector(env, path, debug_options);
+#endif  // HAVE_INSPECTOR
   }
 }
 
@@ -3843,10 +3840,6 @@ static void StartDebug(Environment* env, const char* path,
 // Called from the main thread.
 static void EnableDebug(Environment* env) {
   CHECK(debugger_running);
-
-  if (!debug_options.debugger_enabled()) {
-    return;
-  }
 
   // Send message to enable debug in workers
   HandleScope handle_scope(env->isolate());
@@ -3862,16 +3855,6 @@ static void EnableDebug(Environment* env) {
 
   // Enabled debugger, possibly making it wait on a semaphore
   env->debugger_agent()->Enable();
-}
-
-
-// Called from an arbitrary thread.
-static void TryStartDebugger() {
-  Mutex::ScopedLock scoped_lock(node_isolate_mutex);
-  if (auto isolate = node_isolate) {
-    v8::Debug::DebugBreak(isolate);
-    uv_async_send(&dispatch_debug_messages_async);
-  }
 }
 
 
@@ -3897,11 +3880,6 @@ static void DispatchDebugMessagesAsyncCallback(uv_async_t* handle) {
 
 
 #ifdef __POSIX__
-static void EnableDebugSignalHandler(int signo) {
-  uv_sem_post(&debug_semaphore);
-}
-
-
 void RegisterSignalHandler(int signal,
                            void (*handler)(int signal),
                            bool reset_handler) {
@@ -3917,6 +3895,7 @@ void RegisterSignalHandler(int signal,
   sigfillset(&sa.sa_mask);
   CHECK_EQ(sigaction(signal, &sa, nullptr), 0);
 }
+#endif  // __POSIX__
 
 
 void DebugProcess(const FunctionCallbackInfo<Value>& args) {
@@ -3926,209 +3905,8 @@ void DebugProcess(const FunctionCallbackInfo<Value>& args) {
     return env->ThrowError("Invalid number of arguments.");
   }
 
-  pid_t pid;
-  int r;
-
-  pid = args[0]->IntegerValue();
-  r = kill(pid, SIGUSR1);
-  if (r != 0) {
-    return env->ThrowErrnoException(errno, "kill");
-  }
+  env->inspector_agent()->DebugProcess(args[0]->IntegerValue());
 }
-
-
-inline void* DebugSignalThreadMain(void* unused) {
-  for (;;) {
-    uv_sem_wait(&debug_semaphore);
-    TryStartDebugger();
-  }
-  return nullptr;
-}
-
-
-static int RegisterDebugSignalHandler() {
-  // Start a watchdog thread for calling v8::Debug::DebugBreak() because
-  // it's not safe to call directly from the signal handler, it can
-  // deadlock with the thread it interrupts.
-  CHECK_EQ(0, uv_sem_init(&debug_semaphore, 0));
-  pthread_attr_t attr;
-  CHECK_EQ(0, pthread_attr_init(&attr));
-  // Don't shrink the thread's stack on FreeBSD.  Said platform decided to
-  // follow the pthreads specification to the letter rather than in spirit:
-  // https://lists.freebsd.org/pipermail/freebsd-current/2014-March/048885.html
-#ifndef __FreeBSD__
-  CHECK_EQ(0, pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN));
-#endif  // __FreeBSD__
-  CHECK_EQ(0, pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
-  sigset_t sigmask;
-  sigfillset(&sigmask);
-  CHECK_EQ(0, pthread_sigmask(SIG_SETMASK, &sigmask, &sigmask));
-  pthread_t thread;
-  const int err =
-      pthread_create(&thread, &attr, DebugSignalThreadMain, nullptr);
-  CHECK_EQ(0, pthread_sigmask(SIG_SETMASK, &sigmask, nullptr));
-  CHECK_EQ(0, pthread_attr_destroy(&attr));
-  if (err != 0) {
-    fprintf(stderr, "node[%d]: pthread_create: %s\n", getpid(), strerror(err));
-    fflush(stderr);
-    // Leave SIGUSR1 blocked.  We don't install a signal handler,
-    // receiving the signal would terminate the process.
-    return -err;
-  }
-  RegisterSignalHandler(SIGUSR1, EnableDebugSignalHandler);
-  // Unblock SIGUSR1.  A pending SIGUSR1 signal will now be delivered.
-  sigemptyset(&sigmask);
-  sigaddset(&sigmask, SIGUSR1);
-  CHECK_EQ(0, pthread_sigmask(SIG_UNBLOCK, &sigmask, nullptr));
-  return 0;
-}
-#endif  // __POSIX__
-
-
-#ifdef _WIN32
-DWORD WINAPI EnableDebugThreadProc(void* arg) {
-  TryStartDebugger();
-  return 0;
-}
-
-
-static int GetDebugSignalHandlerMappingName(DWORD pid, wchar_t* buf,
-    size_t buf_len) {
-  return _snwprintf(buf, buf_len, L"node-debug-handler-%u", pid);
-}
-
-
-static int RegisterDebugSignalHandler() {
-  wchar_t mapping_name[32];
-  HANDLE mapping_handle;
-  DWORD pid;
-  LPTHREAD_START_ROUTINE* handler;
-
-  pid = GetCurrentProcessId();
-
-  if (GetDebugSignalHandlerMappingName(pid,
-                                       mapping_name,
-                                       arraysize(mapping_name)) < 0) {
-    return -1;
-  }
-
-  mapping_handle = CreateFileMappingW(INVALID_HANDLE_VALUE,
-                                      nullptr,
-                                      PAGE_READWRITE,
-                                      0,
-                                      sizeof *handler,
-                                      mapping_name);
-  if (mapping_handle == nullptr) {
-    return -1;
-  }
-
-  handler = reinterpret_cast<LPTHREAD_START_ROUTINE*>(
-      MapViewOfFile(mapping_handle,
-                    FILE_MAP_ALL_ACCESS,
-                    0,
-                    0,
-                    sizeof *handler));
-  if (handler == nullptr) {
-    CloseHandle(mapping_handle);
-    return -1;
-  }
-
-  *handler = EnableDebugThreadProc;
-
-  UnmapViewOfFile(static_cast<void*>(handler));
-
-  return 0;
-}
-
-
-static void DebugProcess(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
-  Isolate* isolate = args.GetIsolate();
-  DWORD pid;
-  HANDLE process = nullptr;
-  HANDLE thread = nullptr;
-  HANDLE mapping = nullptr;
-  wchar_t mapping_name[32];
-  LPTHREAD_START_ROUTINE* handler = nullptr;
-
-  if (args.Length() != 1) {
-    env->ThrowError("Invalid number of arguments.");
-    goto out;
-  }
-
-  pid = (DWORD) args[0]->IntegerValue();
-
-  process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-                            PROCESS_VM_OPERATION | PROCESS_VM_WRITE |
-                            PROCESS_VM_READ,
-                        FALSE,
-                        pid);
-  if (process == nullptr) {
-    isolate->ThrowException(
-        WinapiErrnoException(isolate, GetLastError(), "OpenProcess"));
-    goto out;
-  }
-
-  if (GetDebugSignalHandlerMappingName(pid,
-                                       mapping_name,
-                                       arraysize(mapping_name)) < 0) {
-    env->ThrowErrnoException(errno, "sprintf");
-    goto out;
-  }
-
-  mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, mapping_name);
-  if (mapping == nullptr) {
-    isolate->ThrowException(WinapiErrnoException(isolate,
-                                             GetLastError(),
-                                             "OpenFileMappingW"));
-    goto out;
-  }
-
-  handler = reinterpret_cast<LPTHREAD_START_ROUTINE*>(
-      MapViewOfFile(mapping,
-                    FILE_MAP_READ,
-                    0,
-                    0,
-                    sizeof *handler));
-  if (handler == nullptr || *handler == nullptr) {
-    isolate->ThrowException(
-        WinapiErrnoException(isolate, GetLastError(), "MapViewOfFile"));
-    goto out;
-  }
-
-  thread = CreateRemoteThread(process,
-                              nullptr,
-                              0,
-                              *handler,
-                              nullptr,
-                              0,
-                              nullptr);
-  if (thread == nullptr) {
-    isolate->ThrowException(WinapiErrnoException(isolate,
-                                                 GetLastError(),
-                                                 "CreateRemoteThread"));
-    goto out;
-  }
-
-  // Wait for the thread to terminate
-  if (WaitForSingleObject(thread, INFINITE) != WAIT_OBJECT_0) {
-    isolate->ThrowException(WinapiErrnoException(isolate,
-                                                 GetLastError(),
-                                                 "WaitForSingleObject"));
-    goto out;
-  }
-
- out:
-  if (process != nullptr)
-    CloseHandle(process);
-  if (thread != nullptr)
-    CloseHandle(thread);
-  if (handler != nullptr)
-    UnmapViewOfFile(handler);
-  if (mapping != nullptr)
-    CloseHandle(mapping);
-}
-#endif  // _WIN32
 
 
 static void DebugPause(const FunctionCallbackInfo<Value>& args) {
@@ -4140,7 +3918,7 @@ static void DebugEnd(const FunctionCallbackInfo<Value>& args) {
   if (debugger_running) {
     Environment* env = Environment::GetCurrent(args);
 #if HAVE_INSPECTOR
-    if (debug_options.inspector_enabled()) {
+    if (!debug_options.debugger_enabled()) {
       env->inspector_agent()->Stop();
     } else {
 #endif
@@ -4336,10 +4114,6 @@ void Init(int* argc,
   const char no_typed_array_heap[] = "--typed_array_max_size_in_heap=0";
   V8::SetFlagsFromString(no_typed_array_heap, sizeof(no_typed_array_heap) - 1);
 
-  if (!debug_options.debugger_enabled() && !debug_options.inspector_enabled()) {
-    RegisterDebugSignalHandler();
-  }
-
   // We should set node_is_initialized here instead of in node::Start,
   // otherwise embedders using node::Init to initialize everything will not be
   // able to set it and native modules will not load for them.
@@ -4453,16 +4227,13 @@ inline int Start(Isolate* isolate, IsolateData* isolate_data,
   Environment env(isolate_data, context);
   env.Start(argc, argv, exec_argc, exec_argv, v8_is_profiling);
 
-  bool debug_enabled =
-      debug_options.debugger_enabled() || debug_options.inspector_enabled();
+  const char* path = argc > 1 ? argv[1] : nullptr;
+  StartDebug(&env, path, debug_options);
 
-  // Start debug agent when argv has --debug
-  if (debug_enabled) {
-    const char* path = argc > 1 ? argv[1] : nullptr;
-    StartDebug(&env, path, debug_options);
-    if (!debugger_running)
-      return 12;  // Signal internal error.
-  }
+  bool debugger_enabled =
+      debug_options.debugger_enabled() || debug_options.inspector_enabled();
+  if (debugger_enabled && !debugger_running)
+    return 12;  // Signal internal error.
 
   {
     Environment::AsyncCallbackScope callback_scope(&env);
@@ -4472,7 +4243,7 @@ inline int Start(Isolate* isolate, IsolateData* isolate_data,
   env.set_trace_sync_io(trace_sync_io);
 
   // Enable debugger
-  if (debug_enabled)
+  if (debug_options.debugger_enabled())
     EnableDebug(&env);
 
   {

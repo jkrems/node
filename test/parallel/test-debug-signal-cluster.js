@@ -22,7 +22,6 @@
 'use strict';
 
 const common = require('../common');
-const assert = require('assert');
 const spawn = require('child_process').spawn;
 const os = require('os');
 const path = require('path');
@@ -34,20 +33,11 @@ const args = [`--debug-port=${port}`, '--no-deprecation', serverPath];
 const options = { stdio: ['inherit', 'inherit', 'pipe', 'ipc'] };
 const child = spawn(process.execPath, args, options);
 
-let expectedContent = [
-  'Starting debugger agent.',
-  'Debugger listening on 127.0.0.1:' + (port + 0),
-  'Starting debugger agent.',
-  'Debugger listening on 127.0.0.1:' + (port + 1),
-  'Starting debugger agent.',
-  'Debugger listening on 127.0.0.1:' + (port + 2),
-].join(os.EOL);
-expectedContent += os.EOL; // the last line also contains an EOL character
-
 let debuggerAgentsOutput = '';
 let debuggerAgentsStarted = false;
 
 let pids;
+const children_started = [false, false, false];
 
 child.stderr.on('data', function(data) {
   const childStderrOutputString = data.toString();
@@ -76,15 +66,25 @@ child.stderr.on('data', function(data) {
 
   if (debuggerAgentsStarted) {
     debuggerAgentsOutput += childStderrOutputString;
-    if (debuggerAgentsOutput.length === expectedContent.length) {
-      onNoMoreDebuggerAgentsOutput();
+    let done = true;
+    for (let i = 0; i < children_started.length; i++) {
+      if (!children_started[i]) {
+        children_started[i] = isDebugAgentOutput(i);
+        done = done && children_started[i];
+      }
+    }
+    if (done) {
+      process.exit();
     }
   }
 });
 
-function onNoMoreDebuggerAgentsOutput() {
-  assertDebuggerAgentsOutput();
-  process.exit();
+function isDebugAgentOutput(child_id) {
+  const predictableOutput = [
+    'Debugger listening on port ' + (port + child_id) + '.',
+    'Warning: This is an experimental feature and could change at any time.',
+    ''].join(os.EOL);
+  return debuggerAgentsOutput.indexOf(predictableOutput) >= 0;
 }
 
 process.on('exit', function onExit() {
@@ -94,20 +94,3 @@ process.on('exit', function onExit() {
     process.kill(pid);
   });
 });
-
-function assertDebuggerAgentsOutput() {
-  // Workers can take different amout of time to start up, and child processes'
-  // output may be interleaved arbitrarily. Moreover, child processes' output
-  // may be written using an arbitrary number of system calls, and no assumption
-  // on buffering or atomicity of output should be made. Thus, we process the
-  // output of all child processes' debugger agents character by character, and
-  // remove each character from the set of expected characters. Once all the
-  // output from all debugger agents has been processed, we consider that we got
-  // the content we expected if there's no character left in the initial
-  // expected content.
-  debuggerAgentsOutput.split('').forEach(function gotChar(char) {
-    expectedContent = expectedContent.replace(char, '');
-  });
-
-  assert.strictEqual(expectedContent, '');
-}

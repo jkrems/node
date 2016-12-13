@@ -37,6 +37,6 @@ if (cluster.isMaster) {
   });
 
   assert.strictEqual(hasDebugArg, process.env.portSet !== undefined);
-  assert.strictEqual(process.debugPort, +process.env.portSet || 5858);
+  assert.strictEqual(process.debugPort, +process.env.portSet || 9229);
   process.exit();
 }

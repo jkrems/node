@@ -2,18 +2,11 @@
 const common = require('../common');
 const assert = require('assert');
 const spawn = require('child_process').spawn;
-const os = require('os');
 
 const debugPort = common.PORT;
 const args = ['--interactive', '--debug-port=' + debugPort];
 const childOptions = { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] };
 const child = spawn(process.execPath, args, childOptions);
-
-const reDeprecationWarning = new RegExp(
-  /^\(node:\d+\) \[DEP0062\] DeprecationWarning: /.source +
-  /node --debug is deprecated\. /.source +
-  /Please use node --inspect instead\.$/.source
-);
 
 child.stdin.write("process.send({ msg: 'childready' });\n");
 
@@ -44,18 +37,9 @@ function processStderrLine(line) {
 }
 
 function assertOutputLines() {
-  // need a var so can swap the first two lines in following
-  // eslint-disable-next-line no-var
-  var expectedLines = [
-    /^Starting debugger agent\.$/,
-    reDeprecationWarning,
-    new RegExp(`^Debugger listening on 127\\.0\\.0\\.1:${debugPort}$`)
+  const expectedLines = [
+    new RegExp('Debugger listening on port ' + debugPort + '\\.')
   ];
-
-  if (os.platform() === 'win32') {
-    expectedLines[1] = expectedLines[0];
-    expectedLines[0] = reDeprecationWarning;
-  }
 
   assert.strictEqual(outputLines.length, expectedLines.length);
   for (let i = 0; i < expectedLines.length; i++)
