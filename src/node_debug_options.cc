@@ -59,6 +59,7 @@ DebugOptions::DebugOptions() :
 #if HAVE_INSPECTOR
                                inspector_enabled_(false),
 #endif  // HAVE_INSPECTOR
+                               debug_brk_used_(false),
                                wait_connect_(false), http_enabled_(false),
                                host_name_("127.0.0.1"), port_(-1) { }
 
@@ -79,9 +80,11 @@ bool DebugOptions::ParseOption(const std::string& option) {
 
   if (option_name == "--inspect") {
     enable_inspector = true;
-  } else if (option_name == "--inspect-brk" || option_name == "--debug-brk") {
-    debugger_enabled_ = true;
+  } else if (option_name == "--inspect-brk") {
     enable_inspector = true;
+    wait_connect_ = true;
+  } else if (option_name == "--debug-brk") {
+    debug_brk_used_ = true;
     wait_connect_ = true;
   } else if (option_name == "--inspect-port" || option_name == "--debug-port") {
     if (!has_argument) return false;

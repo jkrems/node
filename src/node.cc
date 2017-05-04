@@ -3955,6 +3955,12 @@ static void ParseArgs(int* argc,
     exit(9);
   }
 
+  if (debug_options.debug_brk_used() && !debug_options.inspector_enabled()) {
+    fprintf(stderr,
+            "%s: Using --debug-brk without --inspect is no longer supported\n", argv[0]);
+    exit(9);
+  }
+
   // Copy remaining arguments.
   const unsigned int args_left = nargs - index;
 

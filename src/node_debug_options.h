@@ -17,6 +17,9 @@ class DebugOptions {
     return false;
 #endif  // HAVE_INSPECTOR
   }
+  bool debug_brk_used() const {
+    return debug_brk_used_;
+  }
   bool ToolsServerEnabled();
   bool wait_for_connect() const { return wait_connect_; }
   std::string host_name() const { return host_name_; }
@@ -26,6 +29,7 @@ class DebugOptions {
  private:
 #if HAVE_INSPECTOR
   bool inspector_enabled_;
+  bool debug_brk_used_;
 #endif  // HAVE_INSPECTOR
   bool wait_connect_;  // --inspect-brk
   bool http_enabled_;
