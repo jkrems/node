@@ -613,7 +613,8 @@ Maybe<const PackageConfig*> GetPackageConfig(Environment* env,
 
   Local<Value> exports_v;
   Persistent<Value> exports;
-  if (pkg_json->Get(env->context(),
+  if (env->options()->experimental_exports &&
+      pkg_json->Get(env->context(),
       env->exports_string()).ToLocal(&exports_v) &&
       !exports_v->IsNullOrUndefined()) {
     exports.Reset(env->isolate(), exports_v);
@@ -809,6 +810,7 @@ Maybe<URL> PackageExportsResolve(Environment* env,
                                  const std::string& pkg_subpath,
                                  const PackageConfig& pcfg,
                                  const URL& base) {
+  CHECK(env->options()->experimental_exports);
   Isolate* isolate = env->isolate();
   Local<Context> context = env->context();
   Local<Value> exports = pcfg.exports.Get(isolate);

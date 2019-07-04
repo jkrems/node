@@ -1,4 +1,4 @@
-// Flags: --experimental-modules
+// Flags: --experimental-modules --experimental-exports
 
 import { mustCall } from '../common/index.mjs';
 import { ok, strictEqual } from 'assert';
